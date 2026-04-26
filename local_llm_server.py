@@ -20,6 +20,7 @@ import asyncio
 import gc
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -45,6 +46,7 @@ HOST         = os.environ.get("LOCAL_LLM_HOST", "127.0.0.1")
 N_GPU_LAYERS = int(os.environ.get("LLM_N_GPU_LAYERS", "0"))   # CPU専用
 N_THREADS    = int(os.environ.get("LLM_N_THREADS", "6"))       # i5-8500: 6物理コア
 N_CTX        = int(os.environ.get("LLM_N_CTX", "2048"))
+USE_MLOCK    = os.environ.get("LLM_USE_MLOCK", "0") == "1"  # mlock 有効化 (要: RLIMIT_MEMLOCK または CAP_IPC_LOCK)
 
 # API キー認証 (未設定時は認証スキップ、設定時は X-API-Key ヘッダー必須)
 _API_KEY = os.environ.get("LLM_API_KEY", "")
@@ -138,9 +140,8 @@ class SwitchResponse(BaseModel):
 
 # ── ヘルパー ──────────────────────────────────────────────────────────────
 
-import re as _re
 # Gemma 4 の内部思考トークンをレスポンスから除去
-_THINKING_PAT = _re.compile(r'<\|channel\>.*?<channel\|>', _re.DOTALL)
+_THINKING_PAT = re.compile(r'<\|channel\>.*?<channel\|>', re.DOTALL)
 
 def _strip_thinking(text: str) -> str:
     """Gemma 4 の <|channel>thought...<channel|> タグを除去"""
@@ -169,7 +170,7 @@ async def _load_gemma() -> bool:
             n_ctx=N_CTX,
             n_threads=N_THREADS,
             n_batch=512,
-            use_mlock=True,
+            use_mlock=USE_MLOCK,
             chat_format="gemma",
             verbose=False,
         ))
@@ -210,7 +211,7 @@ async def _load_nemotron() -> bool:
             n_ctx=N_CTX,
             n_threads=N_THREADS,
             n_batch=256,
-            use_mlock=True,
+            use_mlock=USE_MLOCK,
             chat_format="chatml",
             verbose=False,
         ))
