@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 local_llm_server.py — ローカルLLMサーバー v18
-192.168.11.239 で稼働。Gemma4 MoE（常時）と Nemotron（排他）を管理。
+Gemma4 MoE (常時) と Nemotron (排他) を管理。ホストは LOCAL_LLM_HOST で設定。
 
 起動:
   python local_llm_server.py
@@ -41,6 +41,7 @@ logger = logging.getLogger("local_llm_server")
 # ── 設定 ──────────────────────────────────────────────────────────────────
 
 PORT         = int(os.environ.get("LOCAL_LLM_PORT", "8082"))
+HOST         = os.environ.get("LOCAL_LLM_HOST", "127.0.0.1")
 N_GPU_LAYERS = int(os.environ.get("LLM_N_GPU_LAYERS", "0"))   # CPU専用
 N_THREADS    = int(os.environ.get("LLM_N_THREADS", "6"))       # i5-8500: 6物理コア
 N_CTX        = int(os.environ.get("LLM_N_CTX", "2048"))
@@ -57,6 +58,15 @@ def _check_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
 
 _auth = Depends(_check_api_key)
+
+
+def _check_host_security() -> None:
+    LAN 公開時に LLM_API_KEY 未設定なら起動を拒否する。
+    if HOST != 127.0.0.1 and not _API_KEY:
+        raise RuntimeError(
+            fLOCAL_LLM_HOST={HOST!r} が設定されていますが LLM_API_KEY が未設定です。
+             LAN 公開時は必ず LLM_API_KEY を設定してください。
+        )
 
 GEMMA_PATH = os.environ.get(
     "GEMMA_MODEL_PATH",
@@ -284,8 +294,8 @@ async def generate_gemma(req: GenerateRequest, _: None = _auth):
                 "tok_per_sec": round(tokens / (elapsed_ms / 1000), 1) if elapsed_ms > 0 else 0,
             }
         except Exception as e:
-            logger.error("Gemma4 generation failed: %s", e)
-            raise HTTPException(500, str(e))
+            logger.exception("Gemma4 generation failed")
+            raise HTTPException(500, "Inference failed") from e
 
 @app.post("/generate/nemotron")
 async def generate_nemotron(req: GenerateRequest, _: None = _auth):
@@ -318,8 +328,8 @@ async def generate_nemotron(req: GenerateRequest, _: None = _auth):
                 "tok_per_sec": round(tokens / (elapsed_ms / 1000), 1) if elapsed_ms > 0 else 0,
             }
         except Exception as e:
-            logger.error("Nemotron generation failed: %s", e)
-            raise HTTPException(500, str(e))
+            logger.exception("Nemotron generation failed")
+            raise HTTPException(500, "Inference failed") from e
 
 @app.post("/generate/structured")
 async def generate_structured(req: StructuredRequest, _: None = _auth):
@@ -352,8 +362,8 @@ async def generate_structured(req: StructuredRequest, _: None = _auth):
                 "tokens": tokens,
             }
         except Exception as e:
-            logger.error("Structured generation failed: %s", e)
-            raise HTTPException(500, str(e))
+            logger.exception("Structured generation failed")
+            raise HTTPException(500, "Inference failed") from e
 
 @app.post("/switch/nemotron", response_model=SwitchResponse)
 async def switch_to_nemotron(_: None = _auth):
@@ -369,8 +379,8 @@ async def switch_to_nemotron(_: None = _auth):
                 message="Switched to Nemotron" if success else "Switch failed",
             )
         except Exception as e:
-            logger.error("Switch to Nemotron failed: %s", e)
-            return SwitchResponse(success=False, active_model=_active_model, message=str(e))
+            logger.exception("Switch to Nemotron failed")
+            return SwitchResponse(success=False, active_model=_active_model, message="Switch failed")
 
 @app.post("/switch/gemma", response_model=SwitchResponse)
 async def switch_to_gemma(_: None = _auth):
@@ -386,8 +396,8 @@ async def switch_to_gemma(_: None = _auth):
                 message="Switched to Gemma4 MoE" if success else "Switch failed",
             )
         except Exception as e:
-            logger.error("Switch to Gemma4 failed: %s", e)
-            return SwitchResponse(success=False, active_model=_active_model, message=str(e))
+            logger.exception("Switch to Gemma4 failed")
+            return SwitchResponse(success=False, active_model=_active_model, message="Switch failed")
 
 @app.post("/benchmark")
 async def benchmark(_: None = _auth):
@@ -415,9 +425,11 @@ async def benchmark(_: None = _auth):
                 "model": "gemma4-26b-moe",
             }
         except Exception as e:
-            raise HTTPException(500, str(e))
+            logger.exception("Benchmark failed")
+            raise HTTPException(500, "Inference failed") from e
 
 # ── メイン ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    _check_host_security()
+    uvicorn.run(app, host=HOST, port=PORT)
