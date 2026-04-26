@@ -63,11 +63,12 @@ _auth = Depends(_check_api_key)
 
 
 def _check_host_security() -> None:
-    LAN 公開時に LLM_API_KEY 未設定なら起動を拒否する。
-    if HOST != 127.0.0.1 and not _API_KEY:
+    """LAN 公開時に LLM_API_KEY 未設定なら起動を拒否する。"""
+    _LOCAL = {"127.0.0.1", "localhost", "::1"}
+    if HOST not in _LOCAL and not _API_KEY:
         raise RuntimeError(
-            fLOCAL_LLM_HOST={HOST!r} が設定されていますが LLM_API_KEY が未設定です。
-             LAN 公開時は必ず LLM_API_KEY を設定してください。
+            "LOCAL_LLM_HOST=" + repr(HOST) + " が設定されていますが LLM_API_KEY が未設定です。"
+            " LAN 公開時は必ず LLM_API_KEY を設定してください。"
         )
 
 GEMMA_PATH = os.environ.get(
@@ -96,6 +97,7 @@ _model_lock      = asyncio.Lock()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _check_host_security()
     logger.info("🚀 Local LLM Server v18 starting...")
     logger.info("   Gemma4 MoE: %s", GEMMA_PATH)
     logger.info("   Nemotron:   %s", NEMOTRON_PATH)
