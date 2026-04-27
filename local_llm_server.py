@@ -55,7 +55,7 @@ _API_KEY = os.environ.get("LLM_API_KEY", "")
 def _check_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
     """LLM_API_KEY 設定時のみ X-API-Key ヘッダーを検証する"""
     if not _API_KEY:
-        return  # 未設定時はスキップ（ローカル開発用）
+        return  # 未設定時はスキップ(ローカル開発用)
     if not x_api_key or not secrets.compare_digest(x_api_key, _API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key")
 
@@ -99,6 +99,7 @@ _nemotron_sem    = asyncio.Semaphore(1)   # single-flight Nemotron inference
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """起動時にセキュリティチェックと Gemma4 のプリロードを行い、終了時にログを出力する。"""
     _check_host_security()
     logger.info("🚀 Local LLM Server v18 starting...")
     logger.info("   Gemma4 MoE: %s", GEMMA_PATH)
@@ -152,9 +153,11 @@ def _strip_thinking(text: str) -> str:
     return _THINKING_PAT.sub('', text).strip()
 
 def _free_memory() -> None:
+    """GC を呼び出して未参照メモリを解放する。"""
     gc.collect()
 
 async def _load_gemma() -> bool:
+    """Gemma4 MoE モデルをロードして _gemma_model にセットする。成功時 True を返す。"""
     global _gemma_model, _active_model
 
     if _gemma_model is not None:
@@ -186,6 +189,7 @@ async def _load_gemma() -> bool:
         return False
 
 async def _unload_gemma() -> None:
+    """Gemma4 モデルを解放して VRAM/RAM を回収する。"""
     global _gemma_model, _active_model
     if _gemma_model is None:
         return
@@ -201,6 +205,7 @@ async def _unload_gemma() -> None:
     logger.info("✅ Gemma4 unloaded")
 
 async def _load_nemotron() -> bool:
+    """Nemotron モデルをロードして _nemotron_model にセットする。成功時 True を返す。"""
     global _nemotron_model, _active_model
     if _nemotron_model is not None:
         return True
@@ -231,6 +236,7 @@ async def _load_nemotron() -> bool:
         return False
 
 async def _unload_nemotron() -> None:
+    """Nemotron モデルを解放して VRAM/RAM を回収する。"""
     global _nemotron_model, _active_model
     if _nemotron_model is None:
         return
@@ -249,6 +255,7 @@ async def _unload_nemotron() -> None:
 
 @app.get("/health")
 def health():
+    """サーバーとモデルのロード状態を返すヘルスチェックエンドポイント。"""
     return {
         "status": "ok",
         "active_model": _active_model,
@@ -258,6 +265,7 @@ def health():
 
 @app.get("/status")
 def status():
+    """スレッド数・GPU レイヤー・モデルパスなど詳細ステータスを返す。"""
     return {
         "active_model": _active_model,
         "n_threads": N_THREADS,
@@ -359,29 +367,36 @@ async def generate_nemotron(req: GenerateRequest, _: None = _auth):
 
 @app.post("/generate/structured")
 async def generate_structured(req: StructuredRequest, _: None = _auth):
-    """GBNF 文法制約付き構造化 JSON 生成（Uchu/Karasu 分析向け）"""
+    """GBNF 文法制約付き構造化 JSON 生成 (Uchu/Karasu 分析向け)"""
     async with _model_lock:
         if _active_model == "nemotron":
             raise HTTPException(503, "Nemotron active. Call /switch/gemma first.")
         if _gemma_model is None:
             if not await _load_gemma():
                 raise HTTPException(503, "Gemma4 unavailable")
+        model = _gemma_model  # capture reference while lock is held
+
+    # Grammar parsing is pure CPU — no model state needed, runs outside any lock
+    from llama_cpp import LlamaGrammar
+    try:
+        grammar = LlamaGrammar.from_string(req.grammar)
+    except Exception as grammar_err:
+        raise HTTPException(422, f"Invalid GBNF grammar: {grammar_err}") from grammar_err
+
+    async with _gemma_sem:
+        if model is None:
+            raise HTTPException(503, "Gemma4 unavailable")
         try:
-            from llama_cpp import LlamaGrammar
-            try:
-                grammar = LlamaGrammar.from_string(req.grammar)
-            except Exception as grammar_err:
-                raise HTTPException(422, f"Invalid GBNF grammar: {grammar_err}") from grammar_err
             t0 = time.time()
             loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(None, lambda: _gemma_model.create_completion(
+            result = await loop.run_in_executor(None, lambda: model.create_completion(
                 prompt=req.prompt,
                 grammar=grammar,
                 max_tokens=req.max_tokens,
                 temperature=req.temperature,
             ))
             choices = result.get("choices", [])
-            text = choices[0]["text"] if choices else ""
+            text = choices[0].get("text") or "" if choices else ""
             elapsed_ms = (time.time() - t0) * 1000
             tokens = result.get("usage", {}).get("completion_tokens", 0)
             return {
