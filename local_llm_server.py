@@ -301,7 +301,7 @@ async def generate_gemma(req: GenerateRequest, _: None = _auth):
                 top_p=req.top_p,
             ))
             choices = result.get("choices", [])
-            text = _strip_thinking((choices[0]["message"].get("content") or "") if choices else "")
+            text = _strip_thinking((choices[0].get("message", {}).get("content") or "") if choices else "")
             elapsed_ms = (time.time() - t0) * 1000
             tokens = result.get("usage", {}).get("completion_tokens", 0)
             return {
@@ -343,7 +343,7 @@ async def generate_nemotron(req: GenerateRequest, _: None = _auth):
                 top_p=req.top_p,
             ))
             choices = result.get("choices", [])
-            text = (choices[0]["message"].get("content") or "") if choices else ""
+            text = (choices[0].get("message", {}).get("content") or "") if choices else ""
             elapsed_ms = (time.time() - t0) * 1000
             tokens = result.get("usage", {}).get("completion_tokens", 0)
             return {
@@ -434,17 +434,22 @@ async def benchmark(_: None = _auth):
     async with _model_lock:
         if _gemma_model is None:
             raise HTTPException(503, "Gemma4 not loaded")
+        model = _gemma_model  # capture reference while lock is held
+
+    async with _gemma_sem:
+        if model is None:
+            raise HTTPException(503, "Gemma4 unavailable")
         try:
             t0 = time.time()
             loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(None, lambda: _gemma_model.create_chat_completion(
+            result = await loop.run_in_executor(None, lambda: model.create_chat_completion(
                 messages=[{"role": "user", "content": "日本語で1から10まで数えてください。"}],
                 max_tokens=50,
                 temperature=0.1,
             ))
             elapsed_ms = (time.time() - t0) * 1000
             choices = result.get("choices", [])
-            text = _strip_thinking((choices[0]["message"].get("content") or "") if choices else "")
+            text = _strip_thinking((choices[0].get("message", {}).get("content") or "") if choices else "")
             tokens = result.get("usage", {}).get("completion_tokens", 0)
             return {
                 "elapsed_ms": round(elapsed_ms),
