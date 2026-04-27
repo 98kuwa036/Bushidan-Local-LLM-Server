@@ -9,6 +9,7 @@ HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8080}"
 N_THREADS="${N_THREADS:-$(nproc 2>/dev/null || echo 4)}"
 PID_FILE="${PID_FILE:-/tmp/nemotron.pid}"
+_SERVER_PID=""
 
 [ ! -x "$SERVER" ] && echo "[ERROR] llama-server not found or not executable: $SERVER" && exit 1
 [ ! -f "$MODEL"  ] && echo "[ERROR] Model not found: $MODEL" && exit 1
@@ -29,9 +30,13 @@ else
     MMAP_OPT="--mmap"
 fi
 
-# シグナルハンドラ (graceful shutdown)
+# シグナルハンドラ (graceful shutdown — プロセス終了 + PID ファイル削除)
 cleanup() {
     echo "[INFO] Shutting down Nemotron..."
+    if [ -n "${_SERVER_PID}" ]; then
+        kill "${_SERVER_PID}" 2>/dev/null || true
+        wait "${_SERVER_PID}" 2>/dev/null || true
+    fi
     rm -f "$PID_FILE"
 }
 trap cleanup EXIT INT TERM
@@ -53,6 +58,7 @@ echo "====================================="
     ${MLOCK_OPT} \
     ${MMAP_OPT} &
 
-echo $! > "$PID_FILE"
-echo "[INFO] Started with PID $(cat "$PID_FILE")"
-wait
+_SERVER_PID=$!
+echo $_SERVER_PID > "$PID_FILE"
+echo "[INFO] Started with PID ${_SERVER_PID}"
+wait "${_SERVER_PID}"

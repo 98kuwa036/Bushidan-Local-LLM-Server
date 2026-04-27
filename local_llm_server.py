@@ -146,10 +146,10 @@ class SwitchResponse(BaseModel):
 # ── ヘルパー ──────────────────────────────────────────────────────────────
 
 # Gemma 4 の内部思考トークンをレスポンスから除去
-_THINKING_PAT = re.compile(r'<\|channel\>.*?<channel\|>', re.DOTALL)
+_THINKING_PAT = re.compile(r'<\|channel\>.*?<\|channel\|>', re.DOTALL)
 
 def _strip_thinking(text: str) -> str:
-    """Gemma 4 の <|channel>thought...<channel|> タグを除去"""
+    """Gemma 4 の <|channel>thought...<|channel|> タグを除去"""
     return _THINKING_PAT.sub('', text).strip()
 
 def _free_memory() -> None:
@@ -381,7 +381,8 @@ async def generate_structured(req: StructuredRequest, _: None = _auth):
     try:
         grammar = LlamaGrammar.from_string(req.grammar)
     except Exception as grammar_err:
-        raise HTTPException(422, f"Invalid GBNF grammar: {grammar_err}") from grammar_err
+        logger.warning("Invalid GBNF grammar: %s", grammar_err)
+        raise HTTPException(422, "Invalid GBNF grammar") from grammar_err
 
     async with _gemma_sem:
         if model is None:
@@ -415,16 +416,18 @@ async def switch_to_nemotron(_: None = _auth):
     async with _model_lock:
         if _active_model == "nemotron":
             return SwitchResponse(success=True, active_model="nemotron", message="Already on Nemotron")
-        try:
-            await _unload_gemma()
-            success = await _load_nemotron()
-            return SwitchResponse(
-                success=success, active_model=_active_model,
-                message="Switched to Nemotron" if success else "Switch failed",
-            )
-        except Exception as e:
-            logger.exception("Switch to Nemotron failed")
-            return SwitchResponse(success=False, active_model=_active_model, message="Switch failed")
+        # Drain in-flight Gemma inference before unloading
+        async with _gemma_sem:
+            try:
+                await _unload_gemma()
+                success = await _load_nemotron()
+                return SwitchResponse(
+                    success=success, active_model=_active_model,
+                    message="Switched to Nemotron" if success else "Switch failed",
+                )
+            except Exception:
+                logger.exception("Switch to Nemotron failed")
+                return SwitchResponse(success=False, active_model=_active_model, message="Switch failed")
 
 @app.post("/switch/gemma", response_model=SwitchResponse)
 async def switch_to_gemma(_: None = _auth):
@@ -432,16 +435,18 @@ async def switch_to_gemma(_: None = _auth):
     async with _model_lock:
         if _active_model == "gemma":
             return SwitchResponse(success=True, active_model="gemma", message="Already on Gemma4 MoE")
-        try:
-            await _unload_nemotron()
-            success = await _load_gemma()
-            return SwitchResponse(
-                success=success, active_model=_active_model,
-                message="Switched to Gemma4 MoE" if success else "Switch failed",
-            )
-        except Exception as e:
-            logger.exception("Switch to Gemma4 failed")
-            return SwitchResponse(success=False, active_model=_active_model, message="Switch failed")
+        # Drain in-flight Nemotron inference before unloading
+        async with _nemotron_sem:
+            try:
+                await _unload_nemotron()
+                success = await _load_gemma()
+                return SwitchResponse(
+                    success=success, active_model=_active_model,
+                    message="Switched to Gemma4 MoE" if success else "Switch failed",
+                )
+            except Exception:
+                logger.exception("Switch to Gemma4 failed")
+                return SwitchResponse(success=False, active_model=_active_model, message="Switch failed")
 
 @app.post("/benchmark")
 async def benchmark(_: None = _auth):
