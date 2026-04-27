@@ -264,7 +264,7 @@ def health():
     }
 
 @app.get("/status")
-def status():
+def status(_: None = _auth):
     """スレッド数・GPU レイヤー・モデルパスなど詳細ステータスを返す。"""
     return {
         "active_model": _active_model,
