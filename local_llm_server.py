@@ -31,7 +31,7 @@ import secrets
 import uvicorn
 from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,7 +46,7 @@ HOST         = os.environ.get("LOCAL_LLM_HOST", "127.0.0.1")
 N_GPU_LAYERS = int(os.environ.get("LLM_N_GPU_LAYERS", "0"))   # CPU専用
 N_THREADS    = int(os.environ.get("LLM_N_THREADS", "6"))       # i5-8500: 6物理コア
 N_CTX        = int(os.environ.get("LLM_N_CTX", "2048"))
-USE_MLOCK    = os.environ.get("LLM_USE_MLOCK", "0") == "1"  # mlock 有効化 (要: RLIMIT_MEMLOCK または CAP_IPC_LOCK)
+USE_MLOCK    = os.environ.get("LLM_USE_MLOCK", "0").lower() in {"1", "true", "yes", "on"}  # mlock 有効化 (要: RLIMIT_MEMLOCK または CAP_IPC_LOCK)
 
 # API キー認証 (未設定時は認証スキップ、設定時は X-API-Key ヘッダー必須)
 _API_KEY = os.environ.get("LLM_API_KEY", "")
@@ -110,7 +110,7 @@ async def lifespan(app: FastAPI):
 
 # ── FastAPI ───────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Bushidan Local LLM Server", version="1.1.0", lifespan=lifespan)
+app = FastAPI(title="Bushidan Local LLM Server", version="18.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -124,16 +124,16 @@ app.add_middleware(
 
 class GenerateRequest(BaseModel):
     prompt: str
-    max_tokens: int = 512
-    temperature: float = 0.7
-    top_p: float = 0.9
+    max_tokens: int = Field(default=512, ge=1, le=4096)
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    top_p: float = Field(default=0.9, ge=0.0, le=1.0)
     system: str = ""
 
 class StructuredRequest(BaseModel):
     prompt: str
     grammar: str           # GBNF 文法文字列
-    max_tokens: int = 256
-    temperature: float = 0.1   # 文法強制時は低温が安定
+    max_tokens: int = Field(default=256, ge=1, le=4096)
+    temperature: float = Field(default=0.1, ge=0.0, le=2.0)
 
 class SwitchResponse(BaseModel):
     success: bool
@@ -188,6 +188,10 @@ async def _unload_gemma() -> None:
     if _gemma_model is None:
         return
     logger.info("🗑️  Unloading Gemma4...")
+    try:
+        _gemma_model.close()
+    except Exception:
+        pass
     _gemma_model = None
     _active_model = None
     _free_memory()
@@ -229,6 +233,10 @@ async def _unload_nemotron() -> None:
     if _nemotron_model is None:
         return
     logger.info("🗑️  Unloading Nemotron...")
+    try:
+        _nemotron_model.close()
+    except Exception:
+        pass
     _nemotron_model = None
     _active_model = None
     _free_memory()
@@ -304,8 +312,11 @@ async def generate_gemma(req: GenerateRequest, _: None = _auth):
 async def generate_nemotron(req: GenerateRequest, _: None = _auth):
     """Nemotron で推論（ChatML テンプレート適用）"""
     async with _model_lock:
+        if _active_model == "gemma":
+            raise HTTPException(503, "Gemma4 active. Call /switch/nemotron first.")
         if _nemotron_model is None:
-            raise HTTPException(503, "Nemotron not loaded. Call /switch/nemotron first.")
+            if not await _load_nemotron():
+                raise HTTPException(503, "Nemotron unavailable")
         try:
             t0 = time.time()
             messages = []
@@ -345,7 +356,10 @@ async def generate_structured(req: StructuredRequest, _: None = _auth):
                 raise HTTPException(503, "Gemma4 unavailable")
         try:
             from llama_cpp import LlamaGrammar
-            grammar = LlamaGrammar.from_string(req.grammar)
+            try:
+                grammar = LlamaGrammar.from_string(req.grammar)
+            except Exception as grammar_err:
+                raise HTTPException(422, f"Invalid GBNF grammar: {grammar_err}") from grammar_err
             t0 = time.time()
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(None, lambda: _gemma_model.create_completion(
@@ -423,7 +437,7 @@ async def benchmark(_: None = _auth):
             return {
                 "elapsed_ms": round(elapsed_ms),
                 "tokens": tokens,
-                "tok_per_sec": round(tokens / (elapsed_ms / 1000), 2) if elapsed_ms > 0 else 0,
+                "tok_per_sec": round(tokens / (elapsed_ms / 1000), 1) if elapsed_ms > 0 else 0,
                 "text": text,
                 "model": "gemma4-26b-moe",
             }
@@ -434,5 +448,4 @@ async def benchmark(_: None = _auth):
 # ── メイン ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    _check_host_security()
     uvicorn.run(app, host=HOST, port=PORT)
