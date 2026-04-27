@@ -91,7 +91,9 @@ NEMOTRON_PATH = os.environ.get(
 _gemma_model:    Optional[object] = None
 _nemotron_model: Optional[object] = None
 _active_model:   Optional[str]    = None   # "gemma" | "nemotron" | None
-_model_lock      = asyncio.Lock()
+_model_lock      = asyncio.Lock()         # guards load/unload/switch state
+_gemma_sem       = asyncio.Semaphore(1)   # single-flight Gemma inference
+_nemotron_sem    = asyncio.Semaphore(1)   # single-flight Nemotron inference
 
 # ── lifespan ──────────────────────────────────────────────────────────────
 
@@ -191,7 +193,7 @@ async def _unload_gemma() -> None:
     try:
         _gemma_model.close()
     except Exception:
-        pass
+        logger.warning("⚠️  Error closing Gemma4 model (may leak GPU memory)", exc_info=True)
     _gemma_model = None
     _active_model = None
     _free_memory()
@@ -236,7 +238,7 @@ async def _unload_nemotron() -> None:
     try:
         _nemotron_model.close()
     except Exception:
-        pass
+        logger.warning("⚠️  Error closing Nemotron model (may leak GPU memory)", exc_info=True)
     _nemotron_model = None
     _active_model = None
     _free_memory()
@@ -280,6 +282,11 @@ async def generate_gemma(req: GenerateRequest, _: None = _auth):
         if _gemma_model is None:
             if not await _load_gemma():
                 raise HTTPException(503, "Gemma4 unavailable")
+        model = _gemma_model  # capture reference while lock is held
+
+    async with _gemma_sem:
+        if model is None:
+            raise HTTPException(503, "Gemma4 unavailable")
         try:
             t0 = time.time()
             messages = []
@@ -287,14 +294,14 @@ async def generate_gemma(req: GenerateRequest, _: None = _auth):
                 messages.append({"role": "system", "content": req.system})
             messages.append({"role": "user", "content": req.prompt})
             loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(None, lambda: _gemma_model.create_chat_completion(
+            result = await loop.run_in_executor(None, lambda: model.create_chat_completion(
                 messages=messages,
                 max_tokens=req.max_tokens,
                 temperature=req.temperature,
                 top_p=req.top_p,
             ))
             choices = result.get("choices", [])
-            text = _strip_thinking(choices[0]["message"]["content"] if choices else "")
+            text = _strip_thinking((choices[0]["message"].get("content") or "") if choices else "")
             elapsed_ms = (time.time() - t0) * 1000
             tokens = result.get("usage", {}).get("completion_tokens", 0)
             return {
@@ -317,6 +324,11 @@ async def generate_nemotron(req: GenerateRequest, _: None = _auth):
         if _nemotron_model is None:
             if not await _load_nemotron():
                 raise HTTPException(503, "Nemotron unavailable")
+        model = _nemotron_model  # capture reference while lock is held
+
+    async with _nemotron_sem:
+        if model is None:
+            raise HTTPException(503, "Nemotron unavailable")
         try:
             t0 = time.time()
             messages = []
@@ -324,14 +336,14 @@ async def generate_nemotron(req: GenerateRequest, _: None = _auth):
                 messages.append({"role": "system", "content": req.system})
             messages.append({"role": "user", "content": req.prompt})
             loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(None, lambda: _nemotron_model.create_chat_completion(
+            result = await loop.run_in_executor(None, lambda: model.create_chat_completion(
                 messages=messages,
                 max_tokens=req.max_tokens,
                 temperature=req.temperature,
                 top_p=req.top_p,
             ))
             choices = result.get("choices", [])
-            text = choices[0]["message"]["content"] if choices else ""
+            text = (choices[0]["message"].get("content") or "") if choices else ""
             elapsed_ms = (time.time() - t0) * 1000
             tokens = result.get("usage", {}).get("completion_tokens", 0)
             return {
@@ -432,7 +444,7 @@ async def benchmark(_: None = _auth):
             ))
             elapsed_ms = (time.time() - t0) * 1000
             choices = result.get("choices", [])
-            text = _strip_thinking(choices[0]["message"]["content"] if choices else "")
+            text = _strip_thinking((choices[0]["message"].get("content") or "") if choices else "")
             tokens = result.get("usage", {}).get("completion_tokens", 0)
             return {
                 "elapsed_ms": round(elapsed_ms),
